@@ -7,12 +7,14 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/enable_shared_from_this.hpp>
 #include <boost/shared_ptr.hpp>
-#include <asio.hpp>
-#include <asio/io_service.hpp>
+//#include <asio.hpp>
+//#include <asio/io_context.hpp>
+#include <boost/asio.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/circular_buffer.hpp>
 #include <set>
 
-#define MAX_SOCKET 5000
+#define MAX_SOCKET 1
 #define BUF_SIZE 8000
 #define CONNECT_PER_LOOP 200
 
@@ -22,7 +24,7 @@ std::string unsub_msg{ "unsub_msg" };
 std::string heartbeat_msg{ "heartbeat_msg" };
 
 int log_fd = -1;
-char svr_ip[32] = "192.168.1.229";
+char svr_ip[32] = "127.0.0.1";
 int port = 11700;
 
 boost::lockfree::spsc_queue<boost::shared_ptr<void>,
@@ -32,9 +34,8 @@ boost::lockfree::spsc_queue<boost::shared_ptr<void>,
 class tcp_channel : public boost::enable_shared_from_this<tcp_channel>
 {
 public:
-	tcp_channel(asio::io_service &io_):ioc(io_),socket_(io_),ep(asio::ip::address::from_string(svr_ip), port),timer(io_, std::chrono::seconds(10))
+	tcp_channel(boost::asio::io_context &io_):ioc(io_),socket_(io_),ep(boost::asio::ip::address::from_string(svr_ip), port),timer(io_)
 	{
-		timer.async_wait(std::bind(&tcp_channel::send_beat, this, std::placeholders::_1));
 	}
 	~tcp_channel()
 	{
@@ -49,19 +50,22 @@ public:
 		ioc.post([self] {socket_del_queue.push(self); });
 	}
 
-	void send_beat(std::error_code ec)
+	void send_beat(boost::system::error_code ec)
 	{
 		if (!ec)
 		{
-			write_buf_queue.push_back(heartbeat_msg);
+			if(socket_.is_open())
+			{
+				write_buf_queue.push_back(heartbeat_msg);
+			}
 			if (!is_writing)
 			{
 				is_writing = true;
 				do_write();
 			}
-			timer.expires_at(timer.expiry() + asio::chrono::seconds(2));
+			timer.expires_at(timer.expiry() + boost::asio::chrono::seconds(2));
 			auto self(shared_from_this());
-			timer.async_wait(std::bind(&tcp_channel::send_beat, self, std::placeholders::_1));
+			timer.async_wait(boost::bind(&tcp_channel::send_beat, self, std::placeholders::_1));
 		}
 		else
 		{
@@ -74,13 +78,16 @@ public:
 	{
 		auto self(shared_from_this());
 		socket_.async_connect(ep,
-			[this, self](std::error_code ec)
+			[this, self](boost::system::error_code ec)
 		{
 			if (!ec)
 			{
 				do_read();
 				write_buf_queue.push_back(sub_msg);
 				do_write();
+
+				timer.expires_at(std::chrono::steady_clock::now() + std::chrono::seconds(2));
+				timer.async_wait(boost::bind(&tcp_channel::send_beat, self, std::placeholders::_1));
 			}
 			else
 			{
@@ -93,9 +100,9 @@ public:
 	void do_write()
 	{
 		auto self(shared_from_this());
-		asio::async_write(socket_,
-			asio::buffer(write_buf_queue.front()),
-			[this, self](std::error_code ec, std::size_t length)
+		boost::asio::async_write(socket_,
+			boost::asio::buffer(write_buf_queue.front()),
+			[this, self](boost::system::error_code ec, std::size_t length)
 		{
 			if (!ec)
 			{
@@ -120,8 +127,8 @@ public:
 	void do_read()
 	{
 		auto self(shared_from_this());
-		socket_.async_read_some(asio::buffer(read_buf, BUF_SIZE),
-			[this, self](std::error_code ec, std::size_t bytes)
+		socket_.async_read_some(boost::asio::buffer(read_buf, BUF_SIZE),
+			[this, self](boost::system::error_code ec, std::size_t bytes)
 		{
 			if (!ec)
 			{
@@ -138,13 +145,13 @@ public:
 	char read_buf[BUF_SIZE + 1];
 	boost::circular_buffer<std::string> write_buf_queue{ 100 };
 
-	asio::io_context &ioc;
-	asio::ip::tcp::socket socket_;
-	asio::ip::tcp::endpoint ep;
+	boost::asio::io_context &ioc;
+	boost::asio::ip::tcp::socket socket_;
+	boost::asio::ip::tcp::endpoint ep;
 
 	bool is_writing{false};
 
-    asio::steady_timer timer; 
+    boost::asio::steady_timer timer; 
 };
 
 class event_handler 
@@ -154,7 +161,7 @@ public:
 	{
 		boost::thread th1([this]
 		{
-			asio::io_context::work worker(context);
+			boost::asio::io_context::work worker(context);
 			context.run();
 		});
 
@@ -188,7 +195,7 @@ public:
 
 private:
 	bool is_running{true};
-	asio::io_service context;
+	boost::asio::io_context context;
 	std::set<boost::shared_ptr<void>> channel_set;
 };
 
